@@ -39,7 +39,7 @@ with st.sidebar:
         select_threshold_mode = st.radio(
             "ソートさせる部分",
             range(3),
-            format_func=lambda x: ["閾値の範囲", "閾値の範囲外", "両方"][x],
+            format_func=lambda x: ["閾値の範囲内", "閾値の範囲外", "両方"][x],
             horizontal=True,
         )
 
