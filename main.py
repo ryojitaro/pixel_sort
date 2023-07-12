@@ -1,18 +1,14 @@
 import streamlit as st
-from pixel_sort import pixel_sort
+from pixel_sort import main, COLOR_SPACE_DICT
 
-color_space_tuple = ("RGB", "HSV", "HLS", "YCrCb", "Lab", "Luv", "XYZ")
+COLOR_SPACE_TUPLE = tuple(COLOR_SPACE_DICT.keys())
+
+YCbCrch = {0: "Y", 1: "Cr", 2: "Cb"}
 
 
 def make_format(index):
     if select_color_space == "YCrCb":
-        match index:
-            case 0:
-                return "Y"
-            case 1:
-                return "Cr"
-            case 2:
-                return "Cb"
+        return YCbCrch[index]
     return select_color_space[index]
 
 
@@ -20,10 +16,9 @@ st.set_page_config("ピクセルソート")
 
 with st.sidebar:
     image = st.file_uploader("画像アップロード", accept_multiple_files=False)
-    angle = st.slider("角度", min_value=0, max_value=360)
-    with st.expander("チャンネル選択"):
+    with st.expander("チャンネル選択", True):
         select_color_space = st.selectbox(
-            "色空間", color_space_tuple, help="どの色空間をソートに使うか"
+            "色空間", COLOR_SPACE_TUPLE, help="どの色空間をソートに使うか"
         )
         select_channel = st.radio(
             "チャンネル",
@@ -32,29 +27,44 @@ with st.sidebar:
             format_func=make_format,
             horizontal=True,
         )
-    with st.expander("閾値の設定"):
+    angle = st.slider("ソート角度", min_value=0, max_value=360)
+    with st.expander("閾値の設定", True):
         select_range_lower, select_range_upper = st.slider(
             "閾値", min_value=0, max_value=255, value=(50, 200)
         )
-        select_threshold_mode = st.radio(
+        select_sort_target = st.radio(
             "ソートさせる部分",
             range(3),
             format_func=lambda x: ["閾値の範囲内", "閾値の範囲外", "両方"][x],
             horizontal=True,
         )
 
+    ispolar = st.checkbox("極座標")
+    if ispolar:
+        polar_degrees = st.slider(
+            "極座標の始端と終端の角度",
+            min_value=0,
+            max_value=360,
+            help="上にある「ソート角度」が0、180、360に近いほど効果が分かりやすく、90、270に近いほど分かりにくい",
+        )
+    else:
+        polar_degrees = None
+
     clicked = st.button("実行")
 
 if clicked and image:
     with st.spinner("処理中…"):
-        image = pixel_sort(
+        image = main(
             image,
+            None,
             select_color_space,
             select_channel,
-            select_threshold_mode,
+            select_sort_target,
             select_range_lower,
             select_range_upper,
             angle,
+            ispolar,
+            polar_degrees,
         )
 
 if image:
