@@ -1,10 +1,12 @@
 import io
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
+from cv2.typing import MatLike
 
 from rotate import derotate_image, rotate_image
-
 
 COLOR_SPACE_DICT = {
     "RGB": cv2.COLOR_BGR2RGB,
@@ -16,172 +18,120 @@ COLOR_SPACE_DICT = {
     "XYZ": cv2.COLOR_BGR2XYZ,
 }
 
-SORT_TARGET_DICT = {
-    0: {2},
-    1: {1},
-    2: {1, 2},
+SORT_TARGETS_DICT = {
+    "in": (2,),
+    "out": (1,),
+    "both": (1, 2),
 }
 
 
-def main(
-    file_bytes: io.BytesIO,
-    mask,
-    select_color_space: str,
-    ch: int,
-    select_sort_target: int,
-    lower: int,
-    upper: int,
-    angle: float,
-    ispolar: bool,
-    polar_deg: float | None,
-) -> bytes:
-    img = cv2.imdecode(np.frombuffer(file_bytes.getvalue(), np.uint8), cv2.IMREAD_COLOR)
-    mask = np.full((img.shape[:2]), 255, np.uint8) if mask is None else mask
+@dataclass
+class PixelsortConfig:
+    color_space: str
+    ch: int
+    sort_targets: str
+    lower: int
+    upper: int
+    angle: float
+    ispolar: bool
+    polar_deg: float
 
-    color_space = COLOR_SPACE_DICT[select_color_space]
-    sort_target = SORT_TARGET_DICT[select_sort_target]
 
-    if ispolar:
-        img = polar(
-            img, mask, color_space, ch, sort_target, lower, upper, angle, polar_deg
+class PixelSort:
+    def __init__(
+        self,
+        img_file: io.BytesIO,
+        cfg: PixelsortConfig,
+    ):
+        self.org_img = cv2.imdecode(
+            np.frombuffer(img_file.getvalue(), np.uint8), cv2.IMREAD_COLOR
         )
-    else:
-        img = prepos(img, mask, color_space, ch, sort_target, lower, upper, angle)
+        self.img = self.org_img.copy()
+        self.mask: MatLike = np.full((self.org_img.shape[:2]), 255, np.uint8)
+        self.cfg = cfg
 
-    return bytes(bytearray(cv2.imencode(".png", img)[1]))
+    @contextmanager
+    def polar_ctx(self):
+        self.img = cv2.rotate(self.img, cv2.ROTATE_90_CLOCKWISE)
+        self.mask = cv2.rotate(self.mask, cv2.ROTATE_90_CLOCKWISE)
+        h, w = self.img.shape[:2]
+        radial_res = int(np.ceil(np.hypot(h, w) / 2))
+        angular_res = int(np.ceil(2 * np.pi * radial_res))
+        dims = (2 * radial_res, 2 * angular_res)
+        center = (w / 2, h / 2)
+        self.img = cv2.warpPolar(
+            self.img,
+            dims,
+            center,
+            radial_res,
+            cv2.WARP_POLAR_LINEAR,
+        )
+        self.mask = cv2.warpPolar(
+            self.mask,
+            dims,
+            center,
+            radial_res,
+            cv2.WARP_POLAR_LINEAR,
+        )
+        step = angular_res * 2 / 360
+        self.img = np.roll(self.img, int(-step * self.cfg.polar_deg), 0)
+        self.mask = np.roll(self.mask, int(-step * self.cfg.polar_deg), 0)
 
+        yield
 
-def polar(
-    img: cv2.Mat,
-    mask: np.ndarray,
-    color_space: str,
-    ch: int,
-    sort_target: int,
-    lower: int,
-    upper: int,
-    angle: float,
-    polar_deg: float | None,
-) -> cv2.Mat:
-    # pre
-    img = expand(img)
-    img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-    mask = cv2.rotate(mask, cv2.ROTATE_90_CLOCKWISE)
-    h, w = img.shape[:2]
-    r = int(np.ceil(np.sqrt(h**2 + w**2) / 2))
-    s = int(np.ceil(2 * np.pi * r))
-    flags = cv2.WARP_POLAR_LINEAR
-    img = cv2.warpPolar(img, (r * 2, s * 2), (w / 2, h / 2), r, flags)
-    mask = cv2.warpPolar(mask, (r * 2, s * 2), (w / 2, h / 2), r, flags)
-    ichido = s * 2 / 360
-    img = np.roll(img, int(-ichido * polar_deg), 0)
-    mask = np.roll(mask, int(-ichido * polar_deg), 0)
+        self.img = np.roll(self.img, int(step * self.cfg.polar_deg), 0)
+        self.img = cv2.warpPolar(
+            self.img,
+            (w, h),
+            center,
+            radial_res,
+            cv2.WARP_POLAR_LINEAR + cv2.WARP_INVERSE_MAP,
+        )
+        self.img = cv2.rotate(self.img, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-    img = prepos(
-        img,
-        mask,
-        color_space,
-        ch,
-        sort_target,
-        lower,
-        upper,
-        angle,
-    )
+    @contextmanager
+    def prepost_ctx(self):
+        angle = self.cfg.angle - 90
+        h_w: tuple[int, int] = self.img.shape[:2]
+        self.img, self.mask = rotate_image(self.img, self.mask, angle)
+        convert_color_space_img = cv2.cvtColor(
+            self.img, COLOR_SPACE_DICT[self.cfg.color_space]
+        )
+        mono = convert_color_space_img[:, :, self.cfg.ch]
+        yield mono
+        self.img = derotate_image(self.img, -angle, h_w)
 
-    # pos
-    img = np.roll(img, int(ichido * polar_deg), 0)
-    img = cv2.warpPolar(img, (w, h), (w / 2, h / 2), r, flags + cv2.WARP_INVERSE_MAP)
-    img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    img = shrink(img)
+    def separation(self, mono: MatLike):
+        targets = SORT_TARGETS_DICT[self.cfg.sort_targets]
+        sep = ((self.cfg.lower <= mono) & (mono <= self.cfg.upper)).astype(np.uint8)
+        if len(targets) == 1:
+            if targets[0] == 1:
+                sep = 1 - sep
+        else:
+            sep += 1
+        sep *= 0 < self.mask
+        return sep
 
-    return img
+    def pixel_sort(self, mono: MatLike):
+        sep = self.separation(mono)
+        for i in range(mono.shape[0]):
+            change_indices = np.where(np.ediff1d(sep[i]) != 0)[0] + 1
+            boundaries = np.r_[0, change_indices, len(sep[i])]
+            starts = boundaries[:-1]
+            ends = boundaries[1:]
+            mask = np.isin(sep[i][starts], (1, 2))
 
+            for start, end in zip(starts[mask], ends[mask]):
+                sorted_grp = np.argsort(mono[i, start:end])
+                self.img[i, start:end] = self.img[i, start:end][sorted_grp]
 
-def prepos(
-    img: cv2.Mat,
-    mask: np.ndarray,
-    color_space: str,
-    ch: int,
-    sort_target: int,
-    lower: int,
-    upper: int,
-    angle: float,
-) -> cv2.Mat:
-    angle = angle - 90
-    # pre
-    h_w = img.shape[:2]
-    img, mask = rotate_image(angle, img, mask)
-    color_space = cv2.cvtColor(img, color_space)
-    mono = color_space[:, :, ch]
+    def main(self) -> bytes:
+        self.img = self.org_img
 
-    img = pixel_sort(img, mask, mono, sort_target, lower, upper)
+        with ExitStack() as stack:
+            if self.cfg.ispolar:
+                stack.enter_context(self.polar_ctx())
+            mono = stack.enter_context(self.prepost_ctx())
+            self.pixel_sort(mono)
 
-    # pos
-    img = derotate_image(-angle, img, h_w)
-
-    return img
-
-
-def expand(img: cv2.Mat) -> cv2.Mat:
-    h, w = img.shape[:2]
-    new_w = w + 2
-    new_h = h + 2
-    M = np.array([[1, 0, 1], [0, 1, 1]], dtype=float)
-    new_img = cv2.warpAffine(img, M, (new_w, new_h), borderMode=cv2.BORDER_REPLICATE)
-    return new_img
-
-
-def shrink(img: cv2.Mat) -> cv2.Mat:
-    h, w = img.shape[:2]
-    new_w = w - 2
-    new_h = h - 2
-    M = np.array([[1, 0, -1], [0, 1, -1]], dtype=float)
-    new_img = cv2.warpAffine(img, M, (new_w, new_h), borderMode=cv2.BORDER_REPLICATE)
-    return new_img
-
-
-def threshold(
-    lower: int, upper: int, arr: np.ndarray, mask_arr: np.ndarray
-) -> np.ndarray:
-    th = (arr >= lower) & (arr <= upper)
-    th = th.astype(np.uint8) + 1
-    result = np.where(mask_arr, th, 0)
-    return result
-
-
-def get_split_indexes(th: np.ndarray) -> np.ndarray:
-    bool_arr = np.full(len(th) + 1, True)
-    bool_arr[1:-1] = th[1:] != th[:-1]
-    result = bool_arr.nonzero()[0]
-    return result
-
-
-def isin(arr: np.ndarray, sort_target: set) -> np.ndarray:
-    result = np.full(len(arr), False)
-    for i in range(len(arr)):
-        if arr[i] in sort_target:
-            result[i] = True
-    return result
-
-
-def pixel_sort(
-    img: cv2.Mat,
-    mask: np.ndarray,
-    mono: np.ndarray,
-    sort_target: set,
-    lower: int,
-    upper: int,
-) -> cv2.Mat:
-    for i in range(img.shape[0]):
-        th = threshold(lower, upper, mono[i], mask[i])
-        split_idxs = get_split_indexes(th)
-        split_bool = isin(th[split_idxs[:-1]], sort_target)
-        lengths = np.ediff1d(split_idxs)
-
-        for idx, lgt in zip(split_idxs[:-1][split_bool], lengths[split_bool]):
-            if lgt == 1:
-                continue
-            sort_grp = mono[i, idx : idx + lgt]
-            sorted_grp = np.argsort(sort_grp)
-            img[i, idx : idx + lgt] = img[i, idx : idx + lgt][sorted_grp]
-
-    return img
+        return bytes(bytearray(cv2.imencode(".png", self.img)[1]))

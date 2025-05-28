@@ -1,71 +1,70 @@
 import streamlit as st
-from pixel_sort import main, COLOR_SPACE_DICT
+
+from pixel_sort import COLOR_SPACE_DICT, SORT_TARGETS_DICT, PixelSort, PixelsortConfig
 
 COLOR_SPACE_TUPLE = tuple(COLOR_SPACE_DICT.keys())
 
 YCbCrch = {0: "Y", 1: "Cr", 2: "Cb"}
-
-
-def make_format(index):
-    if select_color_space == "YCrCb":
-        return YCbCrch[index]
-    return select_color_space[index]
-
 
 st.set_page_config("ピクセルソート")
 
 with st.sidebar:
     image = st.file_uploader("画像アップロード", accept_multiple_files=False)
     with st.expander("チャンネル選択", True):
-        select_color_space = st.selectbox(
+        color_space = st.selectbox(
             "色空間", COLOR_SPACE_TUPLE, help="どの色空間をソートに使うか"
         )
-        select_channel = st.radio(
+        channel = st.radio(
             "チャンネル",
             range(3),
             help="どのチャンネルを基準にソートさせるか",
-            format_func=make_format,
+            format_func=lambda index: YCbCrch[index]
+            if color_space == "YCrCb"
+            else color_space[index],
             horizontal=True,
         )
     angle = st.slider("ソート角度", min_value=0, max_value=360)
     with st.expander("閾値の設定", True):
-        select_range_lower, select_range_upper = st.slider(
+        range_lower, range_upper = st.slider(
             "閾値", min_value=0, max_value=255, value=(50, 200)
         )
-        select_sort_target = st.radio(
+        sort_targets = st.radio(
             "ソートさせる部分",
-            range(3),
-            format_func=lambda x: ["閾値の範囲内", "閾値の範囲外", "両方"][x],
+            SORT_TARGETS_DICT.keys(),
+            format_func=lambda x: {
+                "in": "閾値の範囲内",
+                "out": "閾値の範囲外",
+                "both": "両方",
+            }[x],
             horizontal=True,
         )
 
     ispolar = st.checkbox("極座標")
     if ispolar:
-        polar_degrees = st.slider(
+        polar_deg = st.slider(
             "極座標の始端と終端の角度",
             min_value=0,
             max_value=360,
             help="上にある「ソート角度」が0、180、360に近いほど効果が分かりやすく、90、270に近いほど分かりにくい",
         )
     else:
-        polar_degrees = None
+        polar_deg = 0.0
 
-    clicked = st.button("実行")
+    cfg = PixelsortConfig(
+        color_space,
+        channel,
+        sort_targets,
+        range_lower,
+        range_upper,
+        angle,
+        ispolar,
+        polar_deg,
+    )
 
-if clicked and image:
+if image:
+    sorter = PixelSort(image, cfg)
     with st.spinner("処理中…"):
-        image = main(
-            image,
-            None,
-            select_color_space,
-            select_channel,
-            select_sort_target,
-            select_range_lower,
-            select_range_upper,
-            angle,
-            ispolar,
-            polar_degrees,
-        )
+        image = sorter.main()
 
 if image:
     st.image(image)

@@ -1,10 +1,11 @@
 import cv2
 import numpy as np
+from cv2.typing import MatLike
 
 
 def rotate_image(
-    angle: float, img: cv2.Mat, mask: np.ndarray = None
-) -> tuple[cv2.Mat, np.ndarray]:
+    img: MatLike, mask: MatLike, angle: float
+) -> tuple[MatLike, np.ndarray]:
     h, w = img.shape[:2]
     rad = np.radians(angle)
     # 回転角度のsinとcos
@@ -22,12 +23,12 @@ def rotate_image(
     img_rot = cv2.warpAffine(
         img, matrix, (w_rot, h_rot), borderMode=cv2.BORDER_REPLICATE
     )
-    mask = cv2.warpAffine(mask, matrix, (w_rot, h_rot), borderValue=0)
+    mask = cv2.warpAffine(mask, matrix, (w_rot, h_rot), borderMode=cv2.BORDER_REPLICATE)
 
     return img_rot, mask
 
 
-def derotate_image(angle: float, img: cv2.Mat, h_w: tuple[int, int]) -> cv2.Mat:
+def derotate_image(img: MatLike, angle: float, h_w: tuple[int, int]) -> MatLike:
     h, w = img.shape[:2]
     orig_h, orig_w = h_w
     rad = np.radians(angle)
